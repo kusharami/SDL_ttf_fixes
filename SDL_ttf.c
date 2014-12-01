@@ -1682,6 +1682,25 @@ SDL_Surface* TTF_RenderGlyph_Shaded( TTF_Font* font,
     return TTF_RenderUTF8_Shaded(font, (char *)utf8, fg, bg);
 }
 
+SDL_Surface *TTF_RenderTextTo_Blended(void *buffer, TTF_Font *font,
+									const char *text, SDL_Color fg)
+{
+	SDL_Surface *surface = NULL;
+	Uint8 *utf8;
+	
+	TTF_CHECKPOINTER(text, NULL);
+	
+	utf8 = SDL_stack_alloc(Uint8, SDL_strlen(text)*2+1);
+	if ( utf8 ) {
+		LATIN1_to_UTF8(text, utf8);
+		surface = TTF_RenderUTF8To_Blended(buffer, font, (char *)utf8, fg);
+		SDL_stack_free(utf8);
+	} else {
+		SDL_OutOfMemory();
+	}
+	return surface;
+}
+
 SDL_Surface *TTF_RenderText_Blended(TTF_Font *font,
                 const char *text, SDL_Color fg)
 {
@@ -1701,24 +1720,140 @@ SDL_Surface *TTF_RenderText_Blended(TTF_Font *font,
     return surface;
 }
 
+static SDL_Surface *TTF_RenderUTF8OnSurface_Blended(SDL_Surface* textbuf, TTF_Font *font,
+													const char *text, SDL_Color fg)
+{
+	if (textbuf == NULL)
+		return(NULL);
+	
+	SDL_bool first;
+	int xstart;
+	int width, height;
+	Uint32 alpha;
+	Uint32 pixel;
+	Uint8 *src;
+	Uint32 *dst;
+	Uint32 *dst_check;
+	int row, col;
+	c_glyph *glyph;
+	FT_Error error;
+	FT_Long use_kerning;
+	FT_UInt prev_index = 0;
+	size_t textlen;
+	
+	/* Adding bound checking to avoid all kinds of memory corruption errors
+	 that may occur. */
+	dst_check = (Uint32*)textbuf->pixels + textbuf->pitch/4 * textbuf->h;
+	
+	/* check kerning */
+	use_kerning = FT_HAS_KERNING( font->face ) && font->kerning;
+	
+	/* Load and render each character */
+	textlen = SDL_strlen(text);
+	first = SDL_TRUE;
+	xstart = 0;
+	pixel = (fg.r<<16)|(fg.g<<8)|fg.b;
+	SDL_FillRect(textbuf, NULL, pixel); /* Initialize with fg and 0 alpha */
+	while ( textlen > 0 ) {
+		Uint16 c = UTF8_getch(&text, &textlen);
+		if ( c == UNICODE_BOM_NATIVE || c == UNICODE_BOM_SWAPPED ) {
+			continue;
+		}
+		
+		error = Find_Glyph(font, c, CACHED_METRICS|CACHED_PIXMAP);
+		if ( error ) {
+			TTF_SetFTError("Couldn't find glyph", error);
+			SDL_FreeSurface( textbuf );
+			return NULL;
+		}
+		glyph = font->current;
+		/* Ensure the width of the pixmap is correct. On some cases,
+		 * freetype may report a larger pixmap than possible.*/
+		width = glyph->pixmap.width;
+		if (font->outline <= 0 && width > glyph->maxx - glyph->minx) {
+			width = glyph->maxx - glyph->minx;
+		}
+		/* do kerning, if possible AC-Patch */
+		if ( use_kerning && prev_index && glyph->index ) {
+			FT_Vector delta;
+			FT_Get_Kerning( font->face, prev_index, glyph->index, ft_kerning_default, &delta );
+			xstart += delta.x >> 6;
+		}
+		
+		/* Compensate for the wrap around bug with negative minx's */
+		if ( first && (glyph->minx < 0) ) {
+			xstart -= glyph->minx;
+		}
+		first = SDL_FALSE;
+		
+		for ( row = 0; row < glyph->pixmap.rows; ++row ) {
+			/* Make sure we don't go either over, or under the
+			 * limit */
+			if ( row+glyph->yoffset < 0 ) {
+				continue;
+			}
+			if ( row+glyph->yoffset >= textbuf->h ) {
+				continue;
+			}
+			dst = (Uint32*) textbuf->pixels +
+			(row+glyph->yoffset) * textbuf->pitch/4 +
+			xstart + glyph->minx;
+			
+			/* Added code to adjust src pointer for pixmaps to
+			 * account for pitch.
+			 * */
+			src = (Uint8*) (glyph->pixmap.buffer + glyph->pixmap.pitch * row);
+			for ( col = width; col>0 && dst < dst_check; --col) {
+				alpha = *src++;
+				*dst++ |= pixel | (alpha << 24);
+			}
+		}
+		
+		xstart += glyph->advance;
+		if ( TTF_HANDLE_STYLE_BOLD(font) ) {
+			xstart += font->glyph_overhang;
+		}
+		prev_index = glyph->index;
+	}
+	
+	/* Handle the underline style */
+	if ( TTF_HANDLE_STYLE_UNDERLINE(font) ) {
+		row = TTF_underline_top_row(font);
+		TTF_drawLine_Blended(font, textbuf, row, pixel);
+	}
+	
+	/* Handle the strikethrough style */
+	if ( TTF_HANDLE_STYLE_STRIKETHROUGH(font) ) {
+		row = TTF_strikethrough_top_row(font);
+		TTF_drawLine_Blended(font, textbuf, row, pixel);
+	}
+	return(textbuf);
+}
+
+SDL_Surface *TTF_RenderUTF8To_Blended(void *buffer, TTF_Font *font,
+									const char *text, SDL_Color fg)
+{
+	TTF_CHECKPOINTER(text, NULL);
+	int width, height;
+	
+	/* Get the dimensions of the text surface */
+	if ( ( TTF_SizeUTF8(font, text, &width, &height) < 0 ) || !width )
+	{
+		TTF_SetError("Text has zero width");
+		return(NULL);
+	}
+	
+	SDL_Surface *textbuf = SDL_CreateRGBSurfaceFrom(buffer, width, height, 32, width * 4,
+													0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+
+	return TTF_RenderUTF8OnSurface_Blended(textbuf, font, text, fg);
+}
+
 SDL_Surface *TTF_RenderUTF8_Blended(TTF_Font *font,
                 const char *text, SDL_Color fg)
 {
-    SDL_bool first;
-    int xstart;
     int width, height;
     SDL_Surface *textbuf;
-    Uint32 alpha;
-    Uint32 pixel;
-    Uint8 *src;
-    Uint32 *dst;
-    Uint32 *dst_check;
-    int row, col;
-    c_glyph *glyph;
-    FT_Error error;
-    FT_Long use_kerning;
-    FT_UInt prev_index = 0;
-    size_t textlen;
 
     TTF_CHECKPOINTER(text, NULL);
 
@@ -1731,97 +1866,27 @@ SDL_Surface *TTF_RenderUTF8_Blended(TTF_Font *font,
     /* Create the target surface */
     textbuf = SDL_CreateRGBSurface(SDL_SWSURFACE, width, height, 32,
                                0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
-    if ( textbuf == NULL ) {
-        return(NULL);
-    }
 
-    /* Adding bound checking to avoid all kinds of memory corruption errors
-       that may occur. */
-    dst_check = (Uint32*)textbuf->pixels + textbuf->pitch/4 * textbuf->h;
+	return TTF_RenderUTF8OnSurface_Blended(textbuf, font, text, fg);
+}
 
-    /* check kerning */
-    use_kerning = FT_HAS_KERNING( font->face ) && font->kerning;
-
-    /* Load and render each character */
-    textlen = SDL_strlen(text);
-    first = SDL_TRUE;
-    xstart = 0;
-    pixel = (fg.r<<16)|(fg.g<<8)|fg.b;
-    SDL_FillRect(textbuf, NULL, pixel); /* Initialize with fg and 0 alpha */
-    while ( textlen > 0 ) {
-        Uint16 c = UTF8_getch(&text, &textlen);
-        if ( c == UNICODE_BOM_NATIVE || c == UNICODE_BOM_SWAPPED ) {
-            continue;
-        }
-
-        error = Find_Glyph(font, c, CACHED_METRICS|CACHED_PIXMAP);
-        if ( error ) {
-            TTF_SetFTError("Couldn't find glyph", error);
-            SDL_FreeSurface( textbuf );
-            return NULL;
-        }
-        glyph = font->current;
-        /* Ensure the width of the pixmap is correct. On some cases,
-         * freetype may report a larger pixmap than possible.*/
-        width = glyph->pixmap.width;
-        if (font->outline <= 0 && width > glyph->maxx - glyph->minx) {
-            width = glyph->maxx - glyph->minx;
-        }
-        /* do kerning, if possible AC-Patch */
-        if ( use_kerning && prev_index && glyph->index ) {
-            FT_Vector delta;
-            FT_Get_Kerning( font->face, prev_index, glyph->index, ft_kerning_default, &delta );
-            xstart += delta.x >> 6;
-        }
-
-        /* Compensate for the wrap around bug with negative minx's */
-        if ( first && (glyph->minx < 0) ) {
-            xstart -= glyph->minx;
-        }
-        first = SDL_FALSE;
-
-        for ( row = 0; row < glyph->pixmap.rows; ++row ) {
-            /* Make sure we don't go either over, or under the
-             * limit */
-            if ( row+glyph->yoffset < 0 ) {
-                continue;
-            }
-            if ( row+glyph->yoffset >= textbuf->h ) {
-                continue;
-            }
-            dst = (Uint32*) textbuf->pixels +
-                (row+glyph->yoffset) * textbuf->pitch/4 +
-                xstart + glyph->minx;
-
-            /* Added code to adjust src pointer for pixmaps to
-             * account for pitch.
-             * */
-            src = (Uint8*) (glyph->pixmap.buffer + glyph->pixmap.pitch * row);
-            for ( col = width; col>0 && dst < dst_check; --col) {
-                alpha = *src++;
-                *dst++ |= pixel | (alpha << 24);
-            }
-        }
-
-        xstart += glyph->advance;
-        if ( TTF_HANDLE_STYLE_BOLD(font) ) {
-            xstart += font->glyph_overhang;
-        }
-        prev_index = glyph->index;
-    }
-
-    /* Handle the underline style */
-    if ( TTF_HANDLE_STYLE_UNDERLINE(font) ) {
-        row = TTF_underline_top_row(font);
-        TTF_drawLine_Blended(font, textbuf, row, pixel);
-    }
-
-    /* Handle the strikethrough style */
-    if ( TTF_HANDLE_STYLE_STRIKETHROUGH(font) ) {
-        row = TTF_strikethrough_top_row(font);
-        TTF_drawLine_Blended(font, textbuf, row, pixel);
-    }
-    return(textbuf);
+SDL_Surface *TTF_RenderUTF16To_Blended(void *buffer, TTF_Font *font,
+									   const Uint16 *text, SDL_Color fg)
+{
+	SDL_Surface *surface = NULL;
+	Uint8 *utf8;
+	
+	TTF_CHECKPOINTER(text, NULL);
+	
+	utf8 = SDL_stack_alloc(Uint8, UCS2_len(text)*3+1);
+	if ( utf8 ) {
+		UCS2_to_UTF8(text, utf8);
+		surface = TTF_RenderUTF8To_Blended(buffer, font, (char *)utf8, fg);
+		SDL_stack_free(utf8);
+	} else {
+		SDL_OutOfMemory();
+	}
+	return surface;
 }
 
 SDL_Surface *TTF_RenderUNICODE_Blended(TTF_Font *font,

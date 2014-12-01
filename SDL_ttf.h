@@ -206,6 +206,12 @@ extern DECLSPEC SDL_Surface * SDLCALL TTF_RenderUTF8_Blended(TTF_Font *font,
                 const char *text, SDL_Color fg);
 extern DECLSPEC SDL_Surface * SDLCALL TTF_RenderUNICODE_Blended(TTF_Font *font,
                 const Uint16 *text, SDL_Color fg);
+extern DECLSPEC SDL_Surface * SDLCALL TTF_RenderTextTo_Blended(void *buffer, TTF_Font *font,
+				const char *text, SDL_Color fg);
+extern DECLSPEC SDL_Surface * SDLCALL TTF_RenderUTF8To_Blended(void *buffer, TTF_Font *font,
+				const char *text, SDL_Color fg);
+extern DECLSPEC SDL_Surface * SDLCALL TTF_RenderUTF16To_Blended(void *buffer, TTF_Font *font,
+				const Uint16 *text, SDL_Color fg);
 
 
 /* Create a 32-bit ARGB surface and render the given text at high quality,
